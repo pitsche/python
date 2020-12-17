@@ -3,6 +3,7 @@
 import sys
 import os
 import time
+import csv
 import u2b_spi as spi
 from PyQt5.QtWidgets import (QApplication, QWidget, QCheckBox, QPushButton, QRadioButton, QButtonGroup, QProgressBar,\
                              QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QLabel, QFileDialog, QLineEdit, QTextEdit)
@@ -30,6 +31,13 @@ BSAT_MODE1 = 15
 BSAT_CTRL0 = 16
 BSAT_CTRL1 = 17
 BSAT_WR_DL_ADDR = 27
+BSAT_HID_MASK_0 = 63
+BSAT_HID_MASK_1 = 64
+BSAT_NODE_ERR_MASK = 67
+BSAT_ERR_MASK_PORT_0_0 = 71
+BSAT_ERR_MASK_PORT_0_1 = 72
+BSAT_ERR_MASK_PORT_1_0 = 76
+BSAT_ERR_MASK_PORT_1_1 = 77
 BSAT_BOARD_TYPE = 83
 BSAT_NODE_INFO = 99
 
@@ -72,6 +80,7 @@ class Usb2Bsat(QWidget):
         self.numOfPorts = 2
         self.lblRx = [None] * 64  # create list. used to display Port LED's
         self.btnTx = [None] * 64  
+        self.errorButton = [None] * 2
         self.updateButton = [None] * 2
         self.port_tx = [[0, 0, 0, 0], [0, 0, 0, 0]] # 2 * (4*8bit) array to transmitt
         self.portWrite = [0, 0] # 2 * true or false if port_tx has been updated
@@ -176,6 +185,10 @@ class Usb2Bsat(QWidget):
             # Tx line
             self.btnTx[i + (port * 32)] = QCheckBox()
             layout.addWidget(self.btnTx[i + (port * 32)], 2, 31-i)  # place lblRx[0] to grid pos 31 .
+        # Error Button
+        self.errorButton[port] = QPushButton('Error')
+        self.errorButton[port].clicked.connect(lambda: self.errorPort(port))
+        layout.addWidget(self.errorButton[port], 0, 32)
         # Update Button
         self.updateButton[port] = QPushButton('Update')
         self.updateButton[port].clicked.connect(lambda: self.updatePort(port))
@@ -238,19 +251,29 @@ class Usb2Bsat(QWidget):
     def createMFDGroupBox(self):
         self.MFDGroupBox = QGroupBox('Manufacturing Data')
         layout = QGridLayout()
-        MFDRead = QPushButton('read MFD')
-        MFDRead.clicked.connect(self.readManufacturingData)
+        btnMFDRead = QPushButton('read MFD')
+        btnMFDRead.clicked.connect(self.readManufacturingData)
         self.btnMFDWrite = QPushButton('write MFD')
         self.btnMFDWrite.clicked.connect(self.writeManufacturingData)
+        btnSafeFile = QPushButton('safe to File')
+        btnSafeFile.clicked.connect(self.safeMFDFile)
+        btnLoadFile = QPushButton('load from File')
+        btnLoadFile.clicked.connect(self.loadMFDFile)
         lblMFDName = {}
         for collumn in range(2):
             for row in range(7):
                 lblMFDName[row + (collumn * 7)] = QLabel(f'{self.MFDDataMap[row + (collumn * 7)]} :')
                 layout.addWidget(lblMFDName[row + (collumn * 7)], row, collumn * 2)
-                self.MFDValue[row + (collumn * 7)] = QLineEdit()
-                layout.addWidget(self.MFDValue[row + (collumn * 7)], row, (collumn * 2) + 1)
-        layout.addWidget(MFDRead, 0, 4)
+                if ((row == 0) & (collumn == 0)): # The first line is Label only 
+                    self.MFDValue[0] = QLabel()
+                    layout.addWidget(self.MFDValue[0], 0, 1)
+                else:
+                    self.MFDValue[row + (collumn * 7)] = QLineEdit()
+                    layout.addWidget(self.MFDValue[row + (collumn * 7)], row, (collumn * 2) + 1)
+        layout.addWidget(btnMFDRead, 0, 4)
         layout.addWidget(self.btnMFDWrite, 1, 4)
+        layout.addWidget(btnSafeFile, 3, 4)
+        layout.addWidget(btnLoadFile, 4, 4)
         self.MFDGroupBox.setLayout(layout)
 
 # ******** END creating LAYOUT ********
@@ -312,6 +335,8 @@ class Usb2Bsat(QWidget):
         while (not (rx[5] & 1 << 0)):  # read until data valid (fifo was not empty)
             spi.write_cmd_bytes(dev, CMD_INOUT, self.ctrlBytes + txData) # read Address
             rx = spi.read(dev, 8)
+            if (ctrl == BUS_CTRL): # no fifo function on BUS_CTRL
+                break
         return(rx[6] * (2**8) + rx[7])
 
     def writeBSAT(self, ctrl, addr, hByte, lByte):
@@ -385,6 +410,13 @@ class Usb2Bsat(QWidget):
             self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x08)  # NodeEnable
             self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x0C)  # IdSuccessful
             self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x0E)  # ScanDone
+        self.writeBSAT(S_PORT, BSAT_HID_MASK_0, 0xFF, 0xFF) # start writing S-Port Mask defaults
+        self.writeBSAT(S_PORT, BSAT_HID_MASK_1, 0xFF, 0xFF)
+        self.writeBSAT(S_PORT, BSAT_NODE_ERR_MASK, 0xFF, 0xFF)
+        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_0_0, 0xFF, 0xFF)
+        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_0_1, 0xFF, 0xFF)
+        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_1_0, 0xFF, 0xFF)
+        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_1_1, 0xFF, 0xFF) # end writing S-Port Mask defaults
         spi.reset_CSx_n(dev)
 
     def setSys(self):
@@ -397,6 +429,7 @@ class Usb2Bsat(QWidget):
 
     def readRpd(self):
         self.rpdFileName = QFileDialog.getOpenFileName(self, "Select File", "", "*.rpd")
+        print(self.rpdFileName[0])
         if (self.rpdFileName[0]):
             head, tail = os.path.split(self.rpdFileName[0])
             self.rpdLblFileName.setText(tail)
@@ -409,8 +442,11 @@ class Usb2Bsat(QWidget):
         self.valBugfix.clear()
         self.valPorts.clear()
         for i in range(14): # clear all TextBoxes
-            self.MFDValue[i].setReadOnly(False)
             self.MFDValue[i].clear()
+        self.updatePortGui([(0, 0, 0, 0),(0, 0, 0, 0)], 0)
+
+    def errorPort(self, port): # read and display errors of the port
+        pass
 
     def updatePort(self, port): # sets the flag that the corresponding port must be written
         self.port_tx[port] = [0, 0, 0, 0]
@@ -431,12 +467,19 @@ class Usb2Bsat(QWidget):
         spi.reset_CSx_n(dev)
         rx = spi.read(dev, 16)
         self.portWrite = [0, 0]  # only update once
-        rx0 = rx[4], rx[5], rx[6], rx[7]
-        rx1 = rx[12], rx[13], rx[14], rx[15] # generate integer range 0 to 2**64
-        self.updatePortGui([rx0, rx1])
+#        rx0 = rx[4], rx[5], rx[6], rx[7] # port 0
+        rx0 = rx[8], rx[9], rx[10], rx[11] # port 0
+        rx1 = rx[12], rx[13], rx[14], rx[15] # port 1
+        sumErr = ((rx[9] * 2**8) + rx[10]) # slv7(p1,p0),slv6(p1,p0)..slv0(p1,p0)
+        self.updatePortGui([rx0, rx1], sumErr)
 
-    def updatePortGui(self, rx0_1):
-       for i in range(self.numOfPorts):
+    def updatePortGui(self, rx0_1, sumErr):
+        actSlv = (self.ctrlBytes[3] >> 4) & 0x7 # get actual controlled slave number
+        for i in range(self.numOfPorts):
+            if (sumErr & 1 << (actSlv * 2 + i)): #sumErr on actSlv actPort
+                self.errorButton[i].setStyleSheet(self.RedLabel)
+            else:
+                self.errorButton[i].setStyleSheet(self.OrgLabel)
             for j in range(4): # byte wise
                 for k in range(8):
                     if (rx0_1[i][3 - j] & 1 << k):  # starting with bit 0, port 0
@@ -500,21 +543,19 @@ class Usb2Bsat(QWidget):
             mem.append(lByte)
         spi.reset_CSx_n(dev)
         for i in range(14): # clear all TextBoxes
-            self.MFDValue[i].setReadOnly(False)
             self.MFDValue[i].clear()
         actVal = 0
         actStr = ''
         for value in mem: # write Manufacturing data to GUI
             if (value == 13): # CR
-                if (actVal == 0): # special case MANU_MAP_ID
-                    self.MFDValue[0].setText('10') # write fix Value
-                    self.MFDValue[0].setReadOnly(True)
-                elif (actVal < 14): # we only have 14 text lines
+                if (actVal < 14): # we only have 14 text lines
                     self.MFDValue[actVal].setText(actStr) # write actual string
                 actVal += 1
                 actStr = ''
-            elif (value):
-                actStr += chr(value) # generate actual string to write
+            elif (32 <= value <= 126): # only ascii chars allowed
+                actStr += chr(value)
+            elif (value <= 9): # MAP_ID is stored as number
+                actStr += str(value)
 
     def eraseManufacturingData(self):
         self.MFDEraseBtn.setStyleSheet(self.OrgLabel)
@@ -557,7 +598,7 @@ class Usb2Bsat(QWidget):
             if (nMode_1 & 1 << 15): # erase done?
                 break
         else: # erase timeout
-            self.self.btnMFDWrite.setStyleSheet(self.RedLabel)
+            self.btnMFDWrite.setStyleSheet(self.RedLabel)
             spi.reset_CSx_n(dev)
             return
         self.writeBSAT(S_PORT, BSAT_CTRL0, 0x84, 0)  # Unlock Sequence 1
@@ -578,6 +619,27 @@ class Usb2Bsat(QWidget):
             self.writeBSAT(S_PORT, WR_AD_Flash_Data, ListToWrite[i], ListToWrite[i + 1])
         self.writeBSAT(S_PORT, BSAT_CTRL1, (1 << 7), 0)  # lock Request
         spi.reset_CSx_n(dev)
+
+    def safeMFDFile(self):
+        filename = QFileDialog.getSaveFileName(self, "Select File", "", "*.csv")
+        if (filename[0]):
+            textArray = []
+            for i in range(1, 14): # read the textBoxes
+                textArray.append(self.MFDValue[i].text())
+            with open(filename[0], 'w') as csvfile:
+                csvwriter = csv.writer(csvfile) # creating csv writer object
+                csvwriter.writerow(textArray) # write data row
+
+    def loadMFDFile(self):
+        filename = QFileDialog.getOpenFileName(self, "Select File", "", "*.csv")
+        if (filename[0]):
+            with open(filename[0]) as csvfile:
+                csv_reader_object = csv.reader(csvfile)
+                textArray = next(csv_reader_object) # read only the first line
+            for i in range(len(textArray)):
+                if (i < 14): # should not, only to avoid errors
+                    self.MFDValue[i + 1].setText(textArray[i])
+            
 
     def downloadFirmware(self, sys):
         self.rpdStartButton.setStyleSheet(self.OrgLabel)
