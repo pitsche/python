@@ -4,25 +4,16 @@ import sys
 import os
 import time
 import csv
-import u2b_spi as spi
+import u2b_base as u2b
 from PyQt5.QtWidgets import (QApplication, QWidget, QCheckBox, QPushButton, QRadioButton, QButtonGroup, QProgressBar,\
                              QHBoxLayout, QVBoxLayout, QGridLayout, QGroupBox, QLabel, QFileDialog, QLineEdit, QTextEdit)
 from PyQt5.QtGui import (QIcon, QPixmap, QIntValidator)
 from PyQt5.QtCore import QTimer, pyqtSignal, Qt
 
-# FTDI Command Processor for MPSSE (FTDI AN-108)
-CMD_OUT = 0x11  # Clock Data Bytes Out on -ve clock edge MSB first (no read)
-CMD_INOUT = 0x31  # out on -ve edge, in on +ve edge
 
 # Other Constants
-PWR_ON  = (1 << 7)
 WR = 1
 RD = 0
-RD_NEXT = 1
-PORT_0 = 0
-PORT_1 = 1
-S_PORT = 2
-BUS_CTRL = 3
  # BSAT_Memory_Map
 BSAT_UID0 = 2
 BSAT_UID1 = 3
@@ -31,9 +22,15 @@ BSAT_MODE1 = 15
 BSAT_CTRL0 = 16
 BSAT_CTRL1 = 17
 BSAT_WR_DL_ADDR = 27
+BSAT_HID_STATUS = 60
+BSAT_HID_PORT_0 = 61
+BSAT_HID_PORT_1 = 62
 BSAT_HID_MASK_0 = 63
 BSAT_HID_MASK_1 = 64
 BSAT_NODE_ERR_MASK = 67
+BSAT_PORT_STATUS = [68, 73] # for Port [0, 1]
+BSAT_ERR_PORT_0 = [69, 74] # errors 15..0
+BSAT_ERR_PORT_1 = [70, 75] # errors 15..0
 BSAT_ERR_MASK_PORT_0_0 = 71
 BSAT_ERR_MASK_PORT_0_1 = 72
 BSAT_ERR_MASK_PORT_1_0 = 76
@@ -50,7 +47,121 @@ RANGE_MFD = 7
 LARGE_FONT = ("Verdana", 12)
 
 # Open FTDI device as dev
-dev = spi.openFTDI()
+dev = u2b.openFTDI()
+
+class HIDWindow(QWidget):
+
+    def __init__(self, dev, slv):
+        super().__init__()
+        self.setGeometry(400, 400, 400, 200)
+        self.setWindowTitle('HIDs')
+        self.setWindowIcon(QIcon(u2b.resource_path('besi.png')))
+        self.GreenLedOn = QPixmap(u2b.resource_path('green-led-on.png')).scaledToWidth(20)
+        self.LedOff = QPixmap(u2b.resource_path('led-off.png')).scaledToWidth(20)
+        self.createHIDBox(dev, slv)
+
+        layout = QGridLayout()
+        layout.addWidget(self.HIDBox, 0, 0, 1, 1)
+        self.setLayout(layout)
+
+    def createHIDBox(self, dev, slv):
+        self.HIDBox = QGroupBox(f'HID Slave: {slv}')
+        # get HID's from actual slave
+        u2b.activate_CS0_n(dev)
+        numOfHID = u2b.readSPort(dev, slv, BSAT_HID_STATUS) & 0x00FF
+        actHID0 = u2b.readSPort(dev, slv, BSAT_HID_PORT_0)
+        actHID1 = u2b.readSPort(dev, slv, BSAT_HID_PORT_1)
+        actHID = actHID0 + (actHID1 * 2 ** 16) # maximum of 32 HID's per Slave
+        u2b.reset_CSx_n(dev)
+
+        layout = QGridLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        self.lblHID = [None] * numOfHID
+        lblBit = {}
+        for i in range(numOfHID):
+            # Rx line
+            self.lblHID[i] = QLabel()
+            if (actHID & 1 << i):
+                self.lblHID[i].setPixmap(self.GreenLedOn)
+            else:
+                self.lblHID[i].setPixmap(self.LedOff)
+
+            self.lblHID[i].setAlignment(Qt.AlignCenter)
+            layout.addWidget(self.lblHID[i], 0, numOfHID - 1 - i)  # place lblHID to grid pos
+            # Bit number
+            lblBit[i] = QLabel(f'{numOfHID -1 - i}')
+            lblBit[i].setAlignment(Qt.AlignCenter)
+            layout.addWidget(lblBit[i], 1, i)
+        self.HIDBox.setLayout(layout)
+
+
+class errorWindow(QWidget):
+
+    def __init__(self, dev, slv, port):
+        super().__init__()
+        self.setGeometry(300, 300, 400, 200)
+        self.setWindowTitle('Port Errors')
+        self.setWindowIcon(QIcon(u2b.resource_path('besi.png')))
+        self.RedLedOn = QPixmap(u2b.resource_path('red-led-on.png')).scaledToWidth(20)
+        self.LedOff = QPixmap(u2b.resource_path('led-off.png')).scaledToWidth(20)
+        self.createErrorBox(dev, slv, port)
+
+        layout = QGridLayout()
+        layout.addWidget(self.errorBox, 0, 0, 1, 1)
+        self.setLayout(layout)
+
+    def createErrorBox(self, dev, slv, port):
+        self.errorBox = QGroupBox(f'Errors Port {port}')
+        # get errors from actual port
+        u2b.activate_CS0_n(dev)
+        numOfErr = u2b.readSPort(dev, slv, BSAT_PORT_STATUS[port]) & 0x003F
+        actErr0 = u2b.readSPort(dev, slv, BSAT_ERR_PORT_0[port])
+        actErr1 = u2b.readSPort(dev, slv, BSAT_ERR_PORT_1[port])
+        actErr = actErr0 + (actErr1 * 2 ** 16) # maximum of 32 Errors per port
+        u2b.reset_CSx_n(dev)
+
+        layout = QGridLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        self.lblErr = [None] * numOfErr
+        lblBit = {}
+        for i in range(numOfErr):
+            # Rx line
+            self.lblErr[i] = QLabel()
+            if (actErr & 1 << i):
+                self.lblErr[i].setPixmap(self.RedLedOn)
+            else:
+                self.lblErr[i].setPixmap(self.LedOff)
+
+            self.lblErr[i].setAlignment(Qt.AlignCenter)
+            layout.addWidget(self.lblErr[i], 0, numOfErr - 1 - i)  # place lblErr to grid pos
+            # Bit number
+            lblBit[i] = QLabel(f'{numOfErr -1 - i}')
+            lblBit[i].setAlignment(Qt.AlignCenter)
+            layout.addWidget(lblBit[i], 1, i)
+        # Reset Button
+        self.resetButton = QPushButton('Reset')
+        self.resetButton.clicked.connect(lambda: self.resetErr(dev, slv, port, numOfErr))
+        layout.addWidget(self.resetButton, 0, numOfErr)
+        self.errorBox.setLayout(layout)
+
+    def resetErr(self, dev, slv, port, numOfErr):
+        # write 0 to error ports
+        u2b.activate_CS0_n(dev)
+        u2b.writeSPort(dev, slv, BSAT_ERR_PORT_0[port], 0x000) 
+        u2b.writeSPort(dev, slv, BSAT_ERR_PORT_1[port], 0x000)
+        # re-read port errors 
+        actErr0 = u2b.readSPort(dev, slv, BSAT_ERR_PORT_0[port])
+        actErr1 = u2b.readSPort(dev, slv, BSAT_ERR_PORT_1[port])
+        actErr = actErr0 + (actErr1 * 2 ** 16) # maximum of 32 Errors per port
+        u2b.reset_CSx_n(dev)
+        # update led status
+        for i in range(numOfErr):
+            # Rx line
+            if (actErr & 1 << i):
+                self.lblErr[i].setPixmap(self.RedLedOn)
+            else:
+                self.lblErr[i].setPixmap(self.LedOff)
+
 
 class Usb2Bsat(QWidget):
 
@@ -66,38 +177,37 @@ class Usb2Bsat(QWidget):
     def initUI(self):
         self.setGeometry(self.left, self.top, self.width, self.hight)
         self.setWindowTitle(self.title)
-        self.setWindowIcon(QIcon(self.resource_path('besi.png')))
+        self.setWindowIcon(QIcon(u2b.resource_path('besi.png')))
 
         self.RedLabel = '''color: white; background-color: red;'''
         self.GreenLabel = '''color: white; background-color: green;'''
         self.OrgLabel = '''color: black; background-color: light grey;'''
-        self.GreenLedOn = QPixmap(self.resource_path('green-led-on.png')).scaledToWidth(20)
-        self.LedOff = QPixmap(self.resource_path('led-off.png')).scaledToWidth(20)
+        self.GreenLedOn = QPixmap(u2b.resource_path('green-led-on.png')).scaledToWidth(20)
+        self.LedOff = QPixmap(u2b.resource_path('led-off.png')).scaledToWidth(20)
 
         #some projektwide used variables
-        self.bsatPwr = 0
-        self.bsatSlave = 0
+        self.slv = 0 # actual slave number
         self.numOfPorts = 2
         self.lblRx = [None] * 64  # create list. used to display Port LED's
         self.btnTx = [None] * 64  
         self.errorButton = [None] * 2
         self.updateButton = [None] * 2
         self.port_tx = [[0, 0, 0, 0], [0, 0, 0, 0]] # 2 * (4*8bit) array to transmitt
-        self.portWrite = [0, 0] # 2 * true or false if port_tx has been updated
-        # Ctrl Bytes 0, 1, 2 are not used.
-        # Ctrl Byte 3 : 7 = bsat pwr, 6..4 = bsat slave, 3 = write, 2..0 = data select (0=Port0, 1=Port1, 2=S-Port, 3=BSAT-BusCtrl)
-        self.ctrlBytes = [0, 0, 0, 0]
         self.MFDDataMap = ['Map ID', 'Board Number', 'Board Index', 'Board Name', 'Board ID', 'Supplier Lot', 'Supplier Name', \
                            'Date of manufacture', 'Configuration', 'Test Location', 'FPGA Design Number', 'Test Date', 'Board History', 'Test ID']
         self.MFDValue = [None] * 14
+        self.popUpWin = None
 
-        self.bsatPwrCheckBox = QCheckBox('&BSAT Power')
+        self.bsatPwrCheckBox = QCheckBox('&BSAT Power    Slv: ')
         self.bsatPwrCheckBox.toggled.connect(self.changePower)
-        slvLbl = QLabel('    Slv: ')
         self.slvRBtn = {}
         self.slvBtnGrp = QButtonGroup()
         for i in range(8):
             self.slvRBtn[i] = 0
+
+        self.lblBlank = QLabel(' ')
+        self.btnHID = QPushButton("HID")
+        self.btnHID.clicked.connect(self.HIDPort)
 
         self.createInfoGroupBox()
         self.createUserPortGroupBox()
@@ -109,11 +219,10 @@ class Usb2Bsat(QWidget):
         self.createMFDGroupBox()
 
         self.topLayout = QHBoxLayout()
-        self.topLayout.addWidget(self.bsatPwrCheckBox)
-        self.topLayout.addWidget(slvLbl)
+        self.topLayout.addWidget(self.bsatPwrCheckBox, )
  
         mainLayout = QGridLayout()
-        mainLayout.addLayout(self.topLayout, 0, 0, 1, 1)
+        mainLayout.addLayout(self.topLayout, 0, 0, 1, 3,)
         mainLayout.addWidget(self.infoGroupBox, 1, 0, 1, 1)
         mainLayout.addWidget(self.userPortGroupBox, 1, 1, 1, 2)
         mainLayout.addWidget(self.portGroupBox[0], 2, 0, 1, 3)
@@ -122,15 +231,10 @@ class Usb2Bsat(QWidget):
         mainLayout.addWidget(self.MFDGroupBox, 5, 0, 1, 3)
         self.setLayout(mainLayout)
 
-        # setup timer to update spi inputs
+        # setup timer to update BSAT Ports
         self.updateTimer = QTimer()
-        self.updateTimer.timeout.connect(self.updateInputs)
+        self.updateTimer.timeout.connect(self.readWritePorts)
 
-
-    def resource_path(self, relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_path, relative_path)
 
 # ***************************************
 # ******** START creating LAYOUT ********
@@ -191,7 +295,7 @@ class Usb2Bsat(QWidget):
         layout.addWidget(self.errorButton[port], 0, 32)
         # Update Button
         self.updateButton[port] = QPushButton('Update')
-        self.updateButton[port].clicked.connect(lambda: self.updatePort(port))
+        self.updateButton[port].clicked.connect(lambda: self.updatePortTx(port))
         layout.addWidget(self.updateButton[port], 2, 32)
         self.portGroupBox[port].setLayout(layout)
 
@@ -281,15 +385,13 @@ class Usb2Bsat(QWidget):
 
     def changePower(self):
         if self.bsatPwrCheckBox.isChecked():
-            self.ctrlBytes[3] = PWR_ON
             self.scanBsat()
             self.updateTimer.start(100)
         else:
             self.updateTimer.stop()
-            self.ctrlBytes[3] = 0
-            spi.activate_CS0_n(dev)
-            spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + [0, 0, 0, 0])  # BSAT Power off 
-            spi.reset_CSx_n(dev)
+            u2b.activate_CS0_n(dev)
+            u2b.write_cmd_bytes(dev, 0x11, [0, 0, 0, 0, 0, 0, 0, 0])  # CMD_OUT all 0 
+            u2b.reset_CSx_n(dev)
             self.resetGui()
 
     def createSlaveButtons(self, scaned):
@@ -302,6 +404,8 @@ class Usb2Bsat(QWidget):
                 self.topLayout.removeWidget(self.slvRBtn[i])
                 self.slvRBtn[i].deleteLater()
                 self.slvRBtn[i] = None
+        self.topLayout.removeWidget(self.lblBlank)
+        self.topLayout.removeWidget(self.btnHID)
         # then we generate a button for each detected slave number
         for i in range(8):
             if (scaned & 1 << i):
@@ -312,86 +416,57 @@ class Usb2Bsat(QWidget):
                 if (not checked):
                     self.slvRBtn[i].setChecked(True)
                     checked = True
+        self.topLayout.addWidget(self.lblBlank, 1)
+        self.topLayout.addWidget(self.btnHID)
 
     def setSlave(self):
         rBtn = self.sender()
         if rBtn.isChecked():
-            slv = int(rBtn.text())
-            self.ctrlBytes[3] &= int('10001111', 2) # reset actual slave bits
-            self.ctrlBytes[3] += slv << 4 # set new slave number
-        self.getSlaveInfo()
-
-    def setWrSel(self, wrRdn, sel):
-        self.ctrlBytes[3] &= 0xF0 # reset wr & select
-        self.ctrlBytes[3] += wrRdn << 3
-        self.ctrlBytes[3] += sel
-
-    def readBSAT(self, ctrl, addr): # returns integer value of 16bit
-        self.setWrSel(RD, ctrl) # read S-Port or BUS_CTRL
-        txData = [RD_NEXT, addr, 0, 0]
-        rx = [0, 0, 0, 0, 0, 0, 0, 0] # preinitialyze rx for first while loop
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + txData) # set Address
-        txData = [0, addr, 0, 0]
-        while (not (rx[5] & 1 << 0)):  # read until data valid (fifo was not empty)
-            spi.write_cmd_bytes(dev, CMD_INOUT, self.ctrlBytes + txData) # read Address
-            rx = spi.read(dev, 8)
-            if (ctrl == BUS_CTRL): # no fifo function on BUS_CTRL
-                break
-        return(rx[6] * (2**8) + rx[7])
-
-    def writeBSAT(self, ctrl, addr, hByte, lByte):
-        self.setWrSel(WR, ctrl) # write S-Port or BUS_CTRL
-        txData = [0, addr, hByte, lByte]
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + txData) # set Address
-
+            self.slv = int(rBtn.text())
+            self.getSlaveInfo()
 
     def scanBsat(self):
-        spi.activate_CS0_n(dev)
-        self.setWrSel(WR, BUS_CTRL)
-        txData = [0, 0, 0x00, 0x02]  # disable continous autoscan, reset rescan bit (0)
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + txData)  # 
-        txData = [0, 0, 0xF0, 0x03]  # max scandelay, initialize rescan
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + txData)
-        txData = [0, 0, 0x00, 0x02]  # disable continous autoscan, reset rescan bit (0)
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + txData)
+        u2b.activate_CS0_n(dev)
+        u2b.busCtrl(dev, WR, 0x0002) # disable continous autoscan, reset rescan bit (0)
+        u2b.busCtrl(dev, WR, 0xF003) # max scandelay, initialize rescan
+        u2b.busCtrl(dev, WR, 0x0002) # disable continous autoscan, reset rescan bit (0)
         rx = [0, 0, 0, 0, 0, 0, 0, 0]
         timeout = 2 # seconds
         timeout_start = time.time()
         while time.time() < timeout_start + timeout:
-            spi.write_cmd_bytes(dev, CMD_INOUT, self.ctrlBytes + txData)
-            rx = spi.read(dev, 8)  #read buffer
+            rx = u2b.busCtrl(dev, RD, 0)
             if (rx[4] & 1 << 3):  # scan done?
                 break
-        else: # erase timeout
+        else: # scan timeout
             print('scan timeout')
-        spi.reset_CSx_n(dev)
+        u2b.reset_CSx_n(dev)
         self.createSlaveButtons(rx[5])
 
     def getSlaveInfo(self):
         brdType = ""
         brdNmbr = ""
         mem = []
-        spi.activate_CS0_n(dev)
+        u2b.activate_CS0_n(dev)
         for i in range(16):  # read memory
-            word = self.readBSAT(S_PORT, BSAT_BOARD_TYPE + i)
+            word = u2b.readSPort(dev, self.slv, BSAT_BOARD_TYPE + i)
             hByte = word >> 8
             lByte = word & 0x00FF
             mem.append(hByte)
             mem.append(lByte)
-        nodeInfo = self.readBSAT(S_PORT, BSAT_NODE_INFO)
+        nodeInfo = u2b.readSPort(dev, self.slv, BSAT_NODE_INFO)
         if (nodeInfo & 1 << 0):
             self.valSysInfo.setText('Auxiliary')
         else:
             self.valSysInfo.setText('Standard')
         self.numOfPorts = (nodeInfo & 0x00F0) // 16 # upper 4 bits
         self.valPorts.setText(f'{self.numOfPorts}')
-        uID_0 = self.readBSAT(S_PORT, BSAT_UID0)
+        uID_0 = u2b.readSPort(dev, self.slv, BSAT_UID0)
         featureID = uID_0 & 0x00FF
         self.valFeature.setText(f'{featureID}')
-        uID_1 = self.readBSAT(S_PORT, BSAT_UID1)
+        uID_1 = u2b.readSPort(dev, self.slv, BSAT_UID1)
         bugFix = uID_1 >> 8
         self.valBugfix.setText(f'{bugFix}')
-        spi.reset_CSx_n(dev)
+        u2b.reset_CSx_n(dev)
         for x in range(0, 16):  # convert to string Board Type
             if mem[x]:
                 brdType += chr(mem[x])
@@ -403,21 +478,21 @@ class Usb2Bsat(QWidget):
         self.enblSlave()
 
     def enblSlave(self):
-        spi.activate_CS0_n(dev)
-        rx = self.readBSAT(S_PORT, BSAT_MODE1)
+        u2b.activate_CS0_n(dev)
+        rx = u2b.readSPort(dev, self.slv, BSAT_MODE1)
         if (rx & 1 << 2): #outputs are disabled
-            self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x00) # set all bits 0 on S-Port address 0x11
-            self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x08)  # NodeEnable
-            self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x0C)  # IdSuccessful
-            self.writeBSAT(S_PORT, BSAT_CTRL1, 0, 0x0E)  # ScanDone
-        self.writeBSAT(S_PORT, BSAT_HID_MASK_0, 0xFF, 0xFF) # start writing S-Port Mask defaults
-        self.writeBSAT(S_PORT, BSAT_HID_MASK_1, 0xFF, 0xFF)
-        self.writeBSAT(S_PORT, BSAT_NODE_ERR_MASK, 0xFF, 0xFF)
-        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_0_0, 0xFF, 0xFF)
-        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_0_1, 0xFF, 0xFF)
-        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_1_0, 0xFF, 0xFF)
-        self.writeBSAT(S_PORT, BSAT_ERR_MASK_PORT_1_1, 0xFF, 0xFF) # end writing S-Port Mask defaults
-        spi.reset_CSx_n(dev)
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 0x0000) # set all bits 0 on S-Port address 0x11
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 0x0008)  # NodeEnable
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 0x000C)  # IdSuccessful
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 0x000E)  # ScanDone
+        u2b.writeSPort(dev, self.slv, BSAT_HID_MASK_0, 0xFFFF) # start writing S-Port Mask defaults
+        u2b.writeSPort(dev, self.slv, BSAT_HID_MASK_1, 0xFFFF)
+        u2b.writeSPort(dev, self.slv, BSAT_NODE_ERR_MASK, 0xFFFF)
+        u2b.writeSPort(dev, self.slv, BSAT_ERR_MASK_PORT_0_0, 0xFFFF)
+        u2b.writeSPort(dev, self.slv, BSAT_ERR_MASK_PORT_0_1, 0xFFFF)
+        u2b.writeSPort(dev, self.slv, BSAT_ERR_MASK_PORT_1_0, 0xFFFF)
+        u2b.writeSPort(dev, self.slv, BSAT_ERR_MASK_PORT_1_1, 0xFFFF) # end writing S-Port Mask defaults
+        u2b.reset_CSx_n(dev)
 
     def setSys(self):
         rBtn = self.sender()
@@ -429,7 +504,6 @@ class Usb2Bsat(QWidget):
 
     def readRpd(self):
         self.rpdFileName = QFileDialog.getOpenFileName(self, "Select File", "", "*.rpd")
-        print(self.rpdFileName[0])
         if (self.rpdFileName[0]):
             head, tail = os.path.split(self.rpdFileName[0])
             self.rpdLblFileName.setText(tail)
@@ -445,38 +519,28 @@ class Usb2Bsat(QWidget):
             self.MFDValue[i].clear()
         self.updatePortGui([(0, 0, 0, 0),(0, 0, 0, 0)], 0)
 
-    def errorPort(self, port): # read and display errors of the port
-        pass
+    def errorPort(self, port): # calls the error window
+        self.popErrWin = errorWindow(dev, self.slv, port)
+        self.popErrWin.show()
 
-    def updatePort(self, port): # sets the flag that the corresponding port must be written
+    def HIDPort(self, port): # calls the HID window
+        self.popHIDWin = HIDWindow(dev, self.slv)
+        self.popHIDWin.show()
+
+    def updatePortTx(self, port): # sets the flag that the corresponding port must be written
         self.port_tx[port] = [0, 0, 0, 0]
         for i in range(4): # bytes
             for j in range(8): # bites
                 if self.btnTx[j + (i * 8) + (port * 32)].isChecked():
                     self.port_tx[port][i] += (2 ** j)
-        self.portWrite[port] = 1 # set update flag
 
-    def updateInputs(self): # read and write (if the flag is set) the ports
-        spi.activate_CS0_n(dev)
-        self.setWrSel(self.portWrite[0], PORT_0)
-        spi.write_cmd_bytes(dev, CMD_OUT, self.ctrlBytes + [self.port_tx[0][3], self.port_tx[0][2], self.port_tx[0][1], self.port_tx[0][0]])  # Port 0 write
-        self.setWrSel(self.portWrite[1], PORT_1)
-        spi.write_cmd_bytes(dev, CMD_INOUT, self.ctrlBytes + [self.port_tx[1][3], self.port_tx[1][2], self.port_tx[1][1], self.port_tx[1][0]]) # Port 0 read, Port 1 write
-        self.setWrSel(RD, PORT_1)
-        spi.write_cmd_bytes(dev, CMD_INOUT, self.ctrlBytes + [0, 0, 0, 0])  # Port 1 read
-        spi.reset_CSx_n(dev)
-        rx = spi.read(dev, 16)
-        self.portWrite = [0, 0]  # only update once
-#        rx0 = rx[4], rx[5], rx[6], rx[7] # port 0
-        rx0 = rx[8], rx[9], rx[10], rx[11] # port 0
-        rx1 = rx[12], rx[13], rx[14], rx[15] # port 1
-        sumErr = ((rx[9] * 2**8) + rx[10]) # slv7(p1,p0),slv6(p1,p0)..slv0(p1,p0)
-        self.updatePortGui([rx0, rx1], sumErr)
+    def readWritePorts(self):
+        port_rec = u2b.updatePorts(dev, self.slv, self.port_tx[0], self.port_tx[1])
+        self.updatePortGui(port_rec[0], port_rec[1])
 
     def updatePortGui(self, rx0_1, sumErr):
-        actSlv = (self.ctrlBytes[3] >> 4) & 0x7 # get actual controlled slave number
         for i in range(self.numOfPorts):
-            if (sumErr & 1 << (actSlv * 2 + i)): #sumErr on actSlv actPort
+            if (sumErr & 1 << (self.slv * 2 + i)): #sumErr on actSlv actPort
                 self.errorButton[i].setStyleSheet(self.RedLabel)
             else:
                 self.errorButton[i].setStyleSheet(self.OrgLabel)
@@ -490,14 +554,14 @@ class Usb2Bsat(QWidget):
     def readMem(self): # read and displays the sPort memory
         if (self.startAddr.text()):
             if (self.numOfWords.text()):
-                spi.activate_CS0_n(dev)
+                u2b.activate_CS0_n(dev)
                 mem = ""
                 for i in range(int(self.numOfWords.text())):
-                    rx = self.readBSAT(S_PORT, int(self.startAddr.text()) + i)
+                    rx = u2b.readSPort(dev, self.slv, int(self.startAddr.text()) + i)
                     word = f"{(rx):0{4}X} "  # convert to '01C3 '
                     mem += word  # add to string
                 self.sPortDisply.setText(mem)
-                spi.reset_CSx_n(dev)
+                u2b.reset_CSx_n(dev)
             else:
                 self.sPortDisply.setText('enter number of words')
         else:
@@ -507,13 +571,11 @@ class Usb2Bsat(QWidget):
         if (self.startAddr.text()):
             if (self.sPortDisply.toPlainText()):
                 mem = self.sPortDisply.toPlainText().split()
-                spi.activate_CS0_n(dev)
+                u2b.activate_CS0_n(dev)
                 for i in range(len(mem)):
                     word_int = int(mem[i], 16)
-                    hb = word_int // 256  # floor division
-                    lb = word_int % 256  # modulus
-                    self.writeBSAT(S_PORT, int(self.startAddr.text()) + i, hb, lb)
-                spi.reset_CSx_n(dev)
+                    u2b.writeSPort(dev, self.slv, int(self.startAddr.text()) + i, word_int)
+                u2b.reset_CSx_n(dev)
             else:
                 self.sPortDisply.setText('enter values to write')
         else:
@@ -529,19 +591,19 @@ class Usb2Bsat(QWidget):
         MFD_Start_AD_LSB = 0x0000
         MFD_MAX_RANGE = 512
         mem = []
-        spi.activate_CS0_n(dev)
+        u2b.activate_CS0_n(dev)
         for i in range(0, MFD_MAX_RANGE, 2): # read only every second address
             actual_AD_LSB = MFD_Start_AD_LSB + i
-            self.writeBSAT(S_PORT, RD_AD_Flash_LSB, actual_AD_LSB // 256, actual_AD_LSB % 256)
-            self.writeBSAT(S_PORT, RD_AD_Flash_MSB, MFD_Start_AD_MSB // 256, MFD_Start_AD_MSB % 256)
-            word = self.readBSAT(S_PORT, RD_AD_Flash_Data)
+            u2b.writeSPort(dev, self.slv, RD_AD_Flash_LSB, actual_AD_LSB)
+            u2b.writeSPort(dev, self.slv, RD_AD_Flash_MSB, MFD_Start_AD_MSB)
+            word = u2b.readSPort(dev, self.slv, RD_AD_Flash_Data)
             if (word == 0xFFFF): # all read
                 break
             hByte = word >> 8
             lByte = word & 0x00FF
             mem.append(hByte)
             mem.append(lByte)
-        spi.reset_CSx_n(dev)
+        u2b.reset_CSx_n(dev)
         for i in range(14): # clear all TextBoxes
             self.MFDValue[i].clear()
         actVal = 0
@@ -581,44 +643,44 @@ class Usb2Bsat(QWidget):
             ListToWrite.append(13) # append CR after each word
         if (len(ListToWrite) % 2): # lenght is odd, we have to appent a 0
             ListToWrite.append(0)
-        spi.activate_CS0_n(dev)
+        u2b.activate_CS0_n(dev)
         # Flash erease
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x84, (RANGE_MFD << 4))  # erase Sequence 1
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x8B, (RANGE_MFD << 4))  # erase Sequence 2
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x36, (RANGE_MFD << 4))  # erase Sequence 3
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x4A, (RANGE_MFD << 4))  # erase Sequence 4
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0xB6, (RANGE_MFD << 4))  # erase Sequence 5
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x4D, (RANGE_MFD << 4))  # erase Sequence 6
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x1B, (RANGE_MFD << 4))  # erase Sequence 7
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x00, (RANGE_MFD << 4) + (1 << 0))  # erase Request
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8400 + (RANGE_MFD << 4))  # erase Sequence 1
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8B00 + (RANGE_MFD << 4))  # erase Sequence 2
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x3600 + (RANGE_MFD << 4))  # erase Sequence 3
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x4A00 + (RANGE_MFD << 4))  # erase Sequence 4
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xB600 + (RANGE_MFD << 4))  # erase Sequence 5
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x4D00 + (RANGE_MFD << 4))  # erase Sequence 6
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x1B00 + (RANGE_MFD << 4))  # erase Sequence 7
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x0000 + (RANGE_MFD << 4) + (1 << 0))  # erase Request
         timeout = 5 # seconds
         timeout_start = time.time()
         while time.time() < timeout_start + timeout:
-            nMode_1 = self.readBSAT(S_PORT, BSAT_MODE1)
+            nMode_1 = u2b.readSPort(dev, self.slv, BSAT_MODE1)
             if (nMode_1 & 1 << 15): # erase done?
                 break
         else: # erase timeout
             self.btnMFDWrite.setStyleSheet(self.RedLabel)
-            spi.reset_CSx_n(dev)
+            u2b.reset_CSx_n(dev)
             return
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x84, 0)  # Unlock Sequence 1
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x8B, 0)  # Unlock Sequence 2
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x36, 0)  # Unlock Sequence 3
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x4A, 0)  # Unlock Sequence 4
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0xB6, 0)  # Unlock Sequence 5
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x4D, 0)  # Unlock Sequence 6
-        self.writeBSAT(S_PORT, BSAT_CTRL0, 0x1B, 0)  # Unlock Sequence 7
-        self.writeBSAT(S_PORT, BSAT_CTRL1, (1 << 6), 0)  # Unlock Request
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8400)  # Unlock Sequence 1
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8B00)  # Unlock Sequence 2
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x3600)  # Unlock Sequence 3
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x4A00)  # Unlock Sequence 4
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xB600)  # Unlock Sequence 5
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x4D00)  # Unlock Sequence 6
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x1B00)  # Unlock Sequence 7
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 1 << 14)  # Unlock Request
         for i in range(0, len(ListToWrite), 2):
             if (i > MFD_MAX_RANGE):
                 print('range error')
                 break
             actual_AD_LSB = MFD_Start_AD_LSB + i
-            self.writeBSAT(S_PORT, WR_AD_Flash_LSB, actual_AD_LSB // 256, actual_AD_LSB % 256)
-            self.writeBSAT(S_PORT, WR_AD_Flash_MSB, MFD_Start_AD_MSB // 256, MFD_Start_AD_MSB % 256)
-            self.writeBSAT(S_PORT, WR_AD_Flash_Data, ListToWrite[i], ListToWrite[i + 1])
-        self.writeBSAT(S_PORT, BSAT_CTRL1, (1 << 7), 0)  # lock Request
-        spi.reset_CSx_n(dev)
+            u2b.writeSPort(dev, self.slv, WR_AD_Flash_LSB, actual_AD_LSB)
+            u2b.writeSPort(dev, self.slv, WR_AD_Flash_MSB, MFD_Start_AD_MSB)
+            u2b.writeSPort(dev, self.slv, WR_AD_Flash_Data, ListToWrite[i] * (2**8) + ListToWrite[i + 1])
+        u2b.writeSPort(dev, self.slv, BSAT_CTRL1, 1 << 15)  # lock Request
+        u2b.reset_CSx_n(dev)
 
     def safeMFDFile(self):
         filename = QFileDialog.getSaveFileName(self, "Select File", "", "*.csv")
@@ -646,65 +708,68 @@ class Usb2Bsat(QWidget):
         if (self.rpdFileName[0]):
             self.updateTimer.stop() # no port read during FW download
             # ****** Erase Section ******
-            spi.activate_CS0_n(dev)
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xFF, (sys << 4))  # Erase Sequence 1
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xDA, (sys << 4))  # Erase Sequence 2
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x91, (sys << 4))  # Erase Sequence 3
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x20, (sys << 4))  # Erase Sequence 4
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xC0, (sys << 4))  # Erase Sequence 5
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x87, (sys << 4))  # Erase Sequence 6
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xAA, (sys << 4))  # Erase Sequence 7
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x00, (sys << 4) + (1 << 0))  # Erase Request
+            u2b.activate_CS0_n(dev)
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xFF00 + (sys << 4))  # Erase Sequence 1
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xDA00 + (sys << 4))  # Erase Sequence 2
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x9100 + (sys << 4))  # Erase Sequence 3
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x2000 + (sys << 4))  # Erase Sequence 4
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xC000 + (sys << 4))  # Erase Sequence 5
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8700 + (sys << 4))  # Erase Sequence 6
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xAA00 + (sys << 4))  # Erase Sequence 7
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x0000 + (sys << 4) + (1 << 0))  # Erase Request
             timeout = 5 # seconds
             timeout_start = time.time()
             while time.time() < timeout_start + timeout:
-                nMode_1 = self.readBSAT(S_PORT, BSAT_MODE1)
+                nMode_1 = u2b.readSPort(dev, self.slv, BSAT_MODE1)
                 if (nMode_1 & 1 << 15): # erase done?
                     break
             else: # erase timeout
                 self.rpdStartButton.setStyleSheet(self.RedLabel)
                 self.updateTimer.start(100)
-                spi.reset_CSx_n(dev)
+                u2b.reset_CSx_n(dev)
                 return
             # ****** Download Section ******
             rpdDlBarAct = 0
             rpdDlBarMax = (os.stat(self.rpdFileName[0]).st_size) # get download file size in bytes
+            rnd = 0
             with open(self.rpdFileName[0], 'rb') as in_file:
                 while True:
-                    fifoHalf = self.readBSAT(BUS_CTRL,0) #check if SPort fifo is less than half full
-                    fifoHalf &= 0x0001
+                    busCtrl = u2b.busCtrl(dev, RD, 0) #check if SPort fifo is less than half full
+                    fifoHalf = busCtrl[7] & 0x01
                     if (not fifoHalf):
-                        for i in range(1000): # we have at least 1k free fifo
+                        rnd += 1
+                        for i in range(2000): # we have at least 2k free fifo
                             self.rpdDlBar.setValue(int(100 / rpdDlBarMax * rpdDlBarAct))
                             rpdDlBarAct += 2 # we write 2 bytes at a time
                             byte = in_file.read(2)
                             if len(byte) == 0: # all written
                                 break
-                            self.writeBSAT(S_PORT, BSAT_WR_DL_ADDR, byte[0], byte[1])  # Firmware Download
+                            u2b.writeSPort(dev, self.slv, BSAT_WR_DL_ADDR, byte[0] * (2**8 ) + byte[1])  # Firmware Download
                         if len(byte) == 0: # all written
                             break
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x00, (sys << 4) + (1 << 3))  # Download Data End
+            print(rnd)
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, (sys << 4) + (1 << 3))  # Download Data End
             timeout = 5 # seconds
             timeout_start = time.time()
             while time.time() < timeout_start + timeout:
-                nMode_1 = self.readBSAT(S_PORT, BSAT_MODE1)
+                nMode_1 = u2b.readSPort(dev, self.slv, BSAT_MODE1)
                 if (nMode_1 & 1 << 14): # download done?
                     break
             else: # prog timeout
                 self.rpdStartButton.setStyleSheet(self.RedLabel)
-                spi.reset_CSx_n(dev)
+                u2b.reset_CSx_n(dev)
                 self.updateTimer.start(100)
                 return
             # ****** Reboot Section ******
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x91, 0)  # Reboot Sequence 1
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x20, 0)  # Reboot Sequence 2
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xC0, 0)  # Reboot Sequence 3
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x87, 0)  # Reboot Sequence 4
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xAA, 0)  # Reboot Sequence 5
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0xF1, 0)  # Reboot Sequence 6
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x60, 0)  # Reboot Sequence 7
-            self.writeBSAT(S_PORT, BSAT_CTRL0, 0x60, 0 + (1 << 1))  # Reboot !
-            spi.reset_CSx_n(dev)
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x9100)  # Reboot Sequence 1
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x2000)  # Reboot Sequence 2
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xC000)  # Reboot Sequence 3
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x8700)  # Reboot Sequence 4
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xAA00)  # Reboot Sequence 5
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0xF100)  # Reboot Sequence 6
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x6000)  # Reboot Sequence 7
+            u2b.writeSPort(dev, self.slv, BSAT_CTRL0, 0x6000 + (1 << 1))  # Reboot !
+            u2b.reset_CSx_n(dev)
             time.sleep(1) # wait for reboot
             self.rpdStartButton.setStyleSheet(self.GreenLabel)
             self.getSlaveInfo() # update slave information

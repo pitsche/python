@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import u2b_spi as spi
+import u2b_base as u2b
 import sys
 import os
 import time
@@ -29,7 +29,7 @@ BSAT_WR_DL_ADDR = 27
 BSAT_BOARD_TYPE = 83
 BSAT_NODE_INFO = 99
 
-dev =spi.openFTDI()
+dev =u2b.openFTDI()
 
 
 class DownloadApp(QWidget):
@@ -50,7 +50,7 @@ class DownloadApp(QWidget):
 
         self.setGeometry(self.left, self.top, self.width, self.hight)
         self.setWindowTitle(self.title)
-        self.setWindowIcon(QIcon(self.resource_path('besi.png')))
+        self.setWindowIcon(QIcon(u2b.resource_path('besi.png')))
         
         self.createInfoGroupBox()
         self.createDLGroupBox()
@@ -64,11 +64,6 @@ class DownloadApp(QWidget):
 
         self.updateInfo()
 
-    def resource_path(self, relative_path):
-        """ Get absolute path to resource, works for dev and for PyInstaller """
-        base_path = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
-        return os.path.join(base_path, relative_path)
-        
     def createInfoGroupBox(self):
         self.InfoGroupBox = QGroupBox('USB2BSAT Firmware Information')
         layout = QGridLayout()
@@ -141,19 +136,19 @@ class DownloadApp(QWidget):
             self.rpdLblFileName.setText(tail)
 
     def readSPort(self, addr): # returns integer value of 16bit
-        spi.write_cmd_bytes(dev, CMD_OUT, [addr, 0, 0]) # set Address
-        spi.write_cmd_bytes(dev, CMD_INOUT, [addr, 0, 0]) # read Address
-        rx = spi.read(dev, 3)
+        u2b.write_cmd_bytes(dev, CMD_OUT, [addr, 0, 0]) # set Address
+        u2b.write_cmd_bytes(dev, CMD_INOUT, [addr, 0, 0]) # read Address
+        rx = u2b.read(dev, 3)
         return(rx[1] * (2**8) + rx[2])
 
     def writeSPort(self, addr, hByte, lByte):
-        spi.write_cmd_bytes(dev, CMD_OUT, [addr, hByte, lByte]) # set Address
+        u2b.write_cmd_bytes(dev, CMD_OUT, [addr, hByte, lByte]) # set Address
 
     def updateInfo(self):
         brdType = ""
         brdNmbr = ""
         mem = []
-        spi.activate_CS1_n(dev)
+        u2b.activate_CS1_n(dev)
         for i in range(16):  # read memory
             word = self.readSPort(BSAT_BOARD_TYPE + i)
             hByte = word >> 8
@@ -173,7 +168,7 @@ class DownloadApp(QWidget):
         uID_1 = self.readSPort(BSAT_UID1)
         bugFix = uID_1 >> 8
         self.valBugfix.setText(f'{bugFix}')
-        spi.reset_CSx_n(dev)
+        u2b.reset_CSx_n(dev)
         for x in range(0, 16):  # convert to string Board Type
             if mem[x]:
                 brdType += chr(mem[x])
@@ -187,7 +182,7 @@ class DownloadApp(QWidget):
     def downloadSelf(self, sys):
         self.rpdStartButton.setStyleSheet(self.OrgLabel)
         if (self.rpdFileName[0]):
-            spi.activate_CS1_n(dev)
+            u2b.activate_CS1_n(dev)
             # ****** Erase Section ******
             self.writeSPort(BSAT_CTRL0, 0xFF, sys)  # Erase Sequence 1
             self.writeSPort(BSAT_CTRL0, 0xDA, sys)  # Erase Sequence 2
@@ -205,7 +200,7 @@ class DownloadApp(QWidget):
                     break
             else: # erase timeout
                 self.rpdStartButton.setStyleSheet(self.RedLabel)
-                spi.reset_CSx_n(dev)
+                u2b.reset_CSx_n(dev)
                 return
             # ****** Download Section ******
             dl_prog = 0
@@ -227,7 +222,7 @@ class DownloadApp(QWidget):
                     break
             else: # prog timeout
                 self.rpdStartButton.setStyleSheet(self.RedLabel)
-                spi.reset_CSx_n(dev)
+                u2b.reset_CSx_n(dev)
                 return
             # ****** Reboot Section ******
             self.writeSPort(BSAT_CTRL0, 0x91, sys)  # Reboot Sequence 1
@@ -238,7 +233,7 @@ class DownloadApp(QWidget):
             self.writeSPort(BSAT_CTRL0, 0xF1, sys)  # Reboot Sequence 6
             self.writeSPort(BSAT_CTRL0, 0x60, sys)  # Reboot Sequence 7
             self.writeSPort(BSAT_CTRL0, 0x00, sys + (1 << 1))  # Reboot !
-            spi.reset_CSx_n(dev)
+            u2b.reset_CSx_n(dev)
             time.sleep(1) # wait for reboot
             self.rpdStartButton.setStyleSheet(self.GreenLabel)
             self.updateInfo
