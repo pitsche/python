@@ -314,12 +314,12 @@ class Usb2Bsat(QWidget):
         sWrite = QPushButton('write')
         sWrite.clicked.connect(self.writeMem)
         layout.addWidget(lblStartAddr, 0, 0)
-        layout.addWidget(self.startAddr, 0, 1)
-        layout.addWidget(lblNumOfWords, 0, 2)
-        layout.addWidget(self.numOfWords, 0, 3)
+        layout.addWidget(self.startAddr, 0, 1, 1, 2)
+        layout.addWidget(lblNumOfWords, 0, 3)
+        layout.addWidget(self.numOfWords, 0, 4, 1, 2)
         layout.addWidget(sRead, 1, 0)
         layout.addWidget(sWrite, 1, 1)
-        layout.addWidget(self.sPortDisply, 2, 0, 3, 5)
+        layout.addWidget(self.sPortDisply, 2, 0, 3, 6)
         self.userPortGroupBox.setLayout(layout)
 
     def createDownloadGroupBox(self):
@@ -731,13 +731,11 @@ class Usb2Bsat(QWidget):
             # ****** Download Section ******
             rpdDlBarAct = 0
             rpdDlBarMax = (os.stat(self.rpdFileName[0]).st_size) # get download file size in bytes
-            rnd = 0
             with open(self.rpdFileName[0], 'rb') as in_file:
                 while True:
                     busCtrl = u2b.busCtrl(dev, RD, 0) #check if SPort fifo is less than half full
                     fifoHalf = busCtrl[7] & 0x01
                     if (not fifoHalf):
-                        rnd += 1
                         for i in range(2000): # we have at least 2k free fifo
                             self.rpdDlBar.setValue(int(100 / rpdDlBarMax * rpdDlBarAct))
                             rpdDlBarAct += 2 # we write 2 bytes at a time
@@ -747,7 +745,6 @@ class Usb2Bsat(QWidget):
                             u2b.writeSPort(dev, self.slv, BSAT_WR_DL_ADDR, byte[0] * (2**8 ) + byte[1])  # Firmware Download
                         if len(byte) == 0: # all written
                             break
-            print(rnd)
             u2b.writeSPort(dev, self.slv, BSAT_CTRL0, (sys << 4) + (1 << 3))  # Download Data End
             timeout = 5 # seconds
             timeout_start = time.time()
@@ -773,6 +770,7 @@ class Usb2Bsat(QWidget):
             time.sleep(1) # wait for reboot
             self.rpdStartButton.setStyleSheet(self.GreenLabel)
             self.getSlaveInfo() # update slave information
+            self.enblSlave()
             self.updateTimer.start(100)
         else:
             self.rpdLblFileName.setText("select rpd File first !")
