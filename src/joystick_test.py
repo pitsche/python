@@ -67,6 +67,8 @@ class joyTest(QWidget):
         HidTarget = hid.HidDeviceFilter(vendor_id = VENDOR_ID, product_id = PRODUCT_ID)
         self.HidDevices = HidTarget.get_devices()
         deviceLabel = QLabel(f'{len(self.HidDevices)} Besi USB Controller found')
+        if (len(self.HidDevices) == 0):
+            deviceLabel.setStyleSheet('''color: red;''')
         if self.HidDevices:
             self.HidDevices[0].open() # we assume that only 1 USB_Controller [0] is connected
             #set custom raw data handler
@@ -140,6 +142,7 @@ class joyTest(QWidget):
         lblStep5.setFont(QFont('Arial',10))
         self.btnSave = QPushButton('Save Test')
         self.btnSave.clicked.connect(self.saveTest)
+        self.lblMessage = QLabel("")
 
         # setup layout
         layout = QVBoxLayout()
@@ -151,6 +154,7 @@ class joyTest(QWidget):
         layout.addWidget(lblStep4)
         layout.addWidget(self.barcode)
         layout.addWidget(self.btnSave)
+        layout.addWidget(self.lblMessage)
         layout.addStretch(1)
         self.controlGroupBox.setLayout(layout)
 
@@ -172,15 +176,31 @@ class joyTest(QWidget):
         self.barcode.setFocus()
 
     def saveTest(self):
-        barcode = self.barcode.text().split(",")
-        # save graph as img object 
-        buf = io.BytesIO()
-        self.graph.figure.savefig(buf, format='png')
-        buf.seek(0)
-        img = Image.open(buf)
-        font = ImageFont.truetype(self.resource_path('OpenSans-Regular.ttf'), 20)
-        ImageDraw.Draw(img).text((0, 0), self.barcode.text(), (0, 0, 0), font=font)
-        img.save('test.png')
+        workDir = os.getcwd()
+        self.lblMessage.setFont(QFont('Arial',10))
+        try:
+            barcode = self.barcode.text().split(",")
+            if (len(barcode) > 7):
+                self.btnSave.setStyleSheet(self.RedLabel)
+                self.lblMessage.setText("Barcode is too long")
+            elif (barcode[0] == 'www.besi.com/mrs'):
+                filename = barcode[2] + '_' + barcode[3] + '_' + barcode[4] + '_' + barcode[5] + '_' + barcode[6] + '.png'
+                # save graph as img object 
+                buf = io.BytesIO()
+                self.graph.figure.savefig(buf, format='png')
+                buf.seek(0)
+                img = Image.open(buf)
+                img.save(filename)
+                self.btnSave.setStyleSheet(self.GreenLabel)
+                self.lblMessage.setFont(QFont('Arial',8))
+                self.lblMessage.setText(f'File is saved under\n{workDir}\{filename}')
+            else:
+                self.btnSave.setStyleSheet(self.RedLabel)
+                self.lblMessage.setText("Be sure to have a correct Barcode")
+        except:
+            self.btnSave.setStyleSheet(self.RedLabel)
+            self.lblMessage.setText("Be sure to have a correct Barcode")
+
 
     def updateGraph(self):
         if self.recOn: # store in array
